@@ -104,6 +104,7 @@ exports[`function with a table binding 1`] = `
         },
         "Handler": "index.handler",
         "LoggingConfig": {
+          "LogFormat": "JSON",
           "LogGroup": {
             "Ref": "FunctionLogGroup55B80E27",
           },
