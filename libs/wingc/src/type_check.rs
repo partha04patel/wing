@@ -8,7 +8,7 @@ pub(crate) mod type_reference_transform;
 
 use crate::ast::{
 	self, AccessModifier, AssignmentKind, BringSource, CalleeKind, ClassField, ExprId, FunctionDefinition, IfLet, New,
-	TypeAnnotationKind, UtilityFunctions,
+	TypeAnnotationKind,
 };
 use crate::ast::{
 	ArgList, BinaryOperator, Class as AstClass, Elifs, Enum as AstEnum, Expr, ExprKind, FunctionBody,
@@ -1664,12 +1664,6 @@ impl Types {
 		self.scope_envs[scope_id].expect("Scope should have an env")
 	}
 
-	pub fn reset_scope_envs(&mut self) {
-		for elem in self.scope_envs.iter_mut() {
-			*elem = None;
-		}
-	}
-
 	/// Obtain the type of a given expression id. Returns None if the expression has not been type checked yet. If
 	/// this is called after type checking, it should always return Some.
 	pub fn try_get_expr_type(&self, expr_id: ExprId) -> Option<TypeRef> {
@@ -1689,12 +1683,6 @@ impl Types {
 	/// Get the type that a JSON literal expression was cast to.
 	pub fn get_type_from_json_cast(&self, expr_id: ExprId) -> Option<&TypeRef> {
 		self.json_literal_casts.get(&expr_id)
-	}
-
-	pub fn reset_expr_types(&mut self) {
-		for elem in self.type_for_expr.iter_mut() {
-			*elem = None;
-		}
 	}
 
 	/// Given a builtin type, return the full class info from the standard library.
@@ -1737,6 +1725,28 @@ impl Types {
 		let fqn = format!("{WINGSDK_ASSEMBLY_NAME}.{WINGSDK_STD_MODULE}.{type_name}");
 
 		self.libraries.lookup_nested_str(fqn.as_str(), None).ok()
+	}
+}
+
+/// Enum of builtin functions, this are defined as hard coded AST nodes in `add_builtins`
+#[derive(Debug)]
+pub enum UtilityFunctions {
+	Log,
+	Assert,
+	UnsafeCast,
+	Nodeof,
+	Lift,
+}
+
+impl Display for UtilityFunctions {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			UtilityFunctions::Log => write!(f, "log"),
+			UtilityFunctions::Assert => write!(f, "assert"),
+			UtilityFunctions::UnsafeCast => write!(f, "unsafeCast"),
+			UtilityFunctions::Nodeof => write!(f, "nodeof"),
+			UtilityFunctions::Lift => write!(f, "lift"),
+		}
 	}
 }
 
@@ -2021,9 +2031,44 @@ impl<'a> TypeChecker<'a> {
 			}),
 			scope,
 		);
+
+		let str_array_type = self.types.add_type(Type::Array(self.types.string()));
+		self.add_builtin(
+			&UtilityFunctions::Lift.to_string(),
+			Type::Function(FunctionSignature {
+				this_type: None,
+				parameters: vec![
+					FunctionParameter {
+						name: "preflightObject".into(),
+						typeref: self.types.resource_base_type(),
+						docs: Docs::with_summary("The preflight object to qualify"),
+						variadic: false,
+					},
+					FunctionParameter {
+						name: "qualifications".into(),
+						typeref: str_array_type,
+						docs: Docs::with_summary("
+							The qualifications to apply to the preflight object.\n
+							This is an array of strings denoting members of the object that are accessed in the current method/function.\n
+							For example, if the method accesses the `push` and `pop` members of a `cloud.Queue` object, the qualifications should be `[\"push\", \"pop\"]`."
+						),
+						variadic: false,
+					},
+				],
+				return_type: self.types.void(),
+				phase: Phase::Inflight,
+				// This builtin actually compiles to nothing in JS, it's a marker that behaves like a function in the type checker
+				// and is used during the lifting phase to explicitly define lifts for an inflight method
+				js_override: Some("".to_string()),
+				docs: Docs::with_summary(
+					"Explicitly apply qualifications to a preflight object used in the current method/function",
+				),
+			}),
+			scope,
+		)
 	}
 
-	pub fn add_builtin(&mut self, name: &str, typ: Type, scope: &mut Scope) {
+	fn add_builtin(&mut self, name: &str, typ: Type, scope: &mut Scope) {
 		let sym = Symbol::global(name);
 		let mut scope_env = self.types.get_scope_env(&scope);
 		scope_env
@@ -2493,9 +2538,11 @@ impl<'a> TypeChecker<'a> {
 						(self.types.add_type(Type::Array(inner_type)), inner_type)
 					};
 
-					// Verify all types are the same as the inferred type
+					// Verify all types are the same as the inferred type and find the aggregate phase of all the items
+					let mut phase = Phase::Independent;
 					for item in items {
-						let (t, _) = self.type_check_exp(item, env);
+						let (t, item_phase) = self.type_check_exp(item, env);
+						phase = combine_phases(phase, item_phase);
 
 						if t.is_json() && !matches!(*element_type, Type::Json(Some(..))) {
 							// This is an array of JSON, change the element type to reflect that
@@ -2533,7 +2580,7 @@ impl<'a> TypeChecker<'a> {
 						*inner = element_type;
 					}
 
-					(container_type, env.phase)
+					(container_type, phase)
 				}
 				ExprKind::MapLiteral { fields, type_ } => {
 					// Infer type based on either the explicit type or the value in one of the fields
