@@ -13,11 +13,10 @@ import { IInflightHost } from "../std";
  * @inflight `@winglang/sdk.cloud.ISecretClient`
  */
 export class Secret extends cloud.Secret implements ISimulatorResource {
-  private readonly name: string;
   constructor(scope: Construct, id: string, props: cloud.SecretProps = {}) {
     super(scope, id, props);
 
-    this.name =
+    this._name =
       props.name ??
       ResourceNames.generateName(this, { disallowedRegex: /[^\w]/g });
   }
@@ -46,7 +45,7 @@ export class Secret extends cloud.Secret implements ISimulatorResource {
       path: this.node.path,
       addr: this.node.addr,
       props: {
-        name: this.name,
+        name: this._name!,
       },
       attrs: {} as any,
     };
